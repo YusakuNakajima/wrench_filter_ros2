@@ -48,9 +48,12 @@ switchのサービスが使えない、またはdeactivateだけの要求まで�
 URでは`/dashboard_client/stop`（プログラム停止）を指定する想定です。
 watchdogが力制御のコントローラを自動で再activateすることはありません。
 
-`fallback_controller`には、typeに`JointTrajectoryController`を含むコントローラだけを指定できます（`scaled_joint_trajectory_controller`なども可）。
+`fallback_controller`には、typeが`joint_trajectory_controller/JointTrajectoryController`または`ur_controllers/ScaledJointTrajectoryController`のコントローラだけを指定できます（完全一致で判定）。
 それ以外のtypeだった場合（速度・力のコントローラなど）は、最初の状態取得の時点でエラーを出し、以後はdeactivateだけを行います。
 activateされたときに今の位置を保持すると分かっているのは、joint trajectory controllerだけだからです。
+`monitored_controllers`に含まれる名前は`fallback_controller`に指定できません（起動時にエラー）。
+
+switchが成功を返しても、そのあとに送った`list_controllers`の結果で`fallback_controller`がactiveになっていなければ、`escalation_service`を呼びます。
 
 一度でもコントローラの状態を取得できたあとに、`list_controllers`が500 ms以上応答しなくなった場合は、監視対象がactiveかどうか分かりません。この状態で入力の異常があれば、`escalation_service`を呼びます。
 起動直後（まだ一度も状態を取得できていない間）は、起動のたびにロボットを止めてしまわないよう、エスカレーションしません。

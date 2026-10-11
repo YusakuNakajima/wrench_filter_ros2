@@ -89,6 +89,12 @@ public:
     if (monitored_controllers_.empty()) {
       throw std::invalid_argument("monitored_controllers must not be empty");
     }
+    if (std::find(
+        monitored_controllers_.begin(), monitored_controllers_.end(), fallback_controller_) !=
+      monitored_controllers_.end())
+    {
+      throw std::invalid_argument("fallback_controller must not be one of monitored_controllers");
+    }
 
     subscription_ = create_subscription<geometry_msgs::msg::WrenchStamped>(
       wrench_topic, 10, [this](geometry_msgs::msg::WrenchStamped::ConstSharedPtr msg) {
@@ -136,25 +142,35 @@ private:
       RCLCPP_ERROR(get_logger(), "list_controllers did not respond within 500 ms");
     }
     if (list_request_ || !list_client_->service_is_ready()) {return;}
-    list_sent_ = SteadyClock::now();
+    const auto sent = SteadyClock::now();
+    list_sent_ = sent;
     list_request_ = list_client_->async_send_request(
       std::make_shared<ListControllers::Request>(),
-      [this](rclcpp::Client<ListControllers>::SharedFuture future) {
+      [this, sent](rclcpp::Client<ListControllers>::SharedFuture future) {
         list_request_.reset();
+        // a response to a request sent before the switch completed cannot verify the switch
+        if (awaiting_verification_ && sent < switch_completed_) {return;}
         std::vector<std::string> active;
+        bool fallback_active = false;
         try {
           for (const auto & c : future.get()->controller) {
             if (c.name == fallback_controller_ && !fallback_checked_) {
               fallback_checked_ = true;
               // only a joint trajectory controller is known to hold the current position on
               // activation; anything else (velocity / effort / force controller) is refused
-              if (c.type.find("JointTrajectoryController") == std::string::npos) {
+              if (std::find(
+                  kHoldingControllerTypes.begin(), kHoldingControllerTypes.end(), c.type) ==
+                kHoldingControllerTypes.end())
+              {
                 RCLCPP_ERROR(
                   get_logger(), "fallback_controller '%s' has type '%s', which is not a joint "
                   "trajectory controller; only deactivating on faults", c.name.c_str(),
                   c.type.c_str());
                 fallback_controller_.clear();
               }
+            }
+            if (c.name == fallback_controller_ && c.state == "active") {
+              fallback_active = true;
             }
             if (c.state == "active" &&
               std::find(monitored_controllers_.begin(), monitored_controllers_.end(), c.name) !=
@@ -168,7 +184,14 @@ private:
           return;  // keep the last known state
         }
         active_monitored_ = active;
+        if (awaiting_verification_ && expect_fallback_active_ && !fallback_active) {
+          // the switch reported ok but nothing is holding the position
+          RCLCPP_ERROR(
+            get_logger(), "%s is not active after the switch", fallback_controller_.c_str());
+          escalate();
+        }
         awaiting_verification_ = false;
+        expect_fallback_active_ = false;
         last_state_update_ = SteadyClock::now();
       }).request_id;
   }
@@ -261,6 +284,8 @@ private:
             get_logger(), "Switched controllers%s. Re-activate the force controller manually "
             "after the wrench input is healthy again.", held.c_str());
           awaiting_verification_ = true;
+          expect_fallback_active_ = with_fallback;
+          switch_completed_ = SteadyClock::now();
           poll_state();
         } else if (with_fallback) {
           RCLCPP_ERROR(
@@ -305,6 +330,10 @@ private:
 
   static constexpr double kResponseMarginMs = 500.0;
   static constexpr double kStateLostMs = 500.0;
+  // controller types known to hold the current position when activated
+  static inline const std::vector<std::string> kHoldingControllerTypes{
+    "joint_trajectory_controller/JointTrajectoryController",
+    "ur_controllers/ScaledJointTrajectoryController"};
 
   WatchdogMonitor monitor_;
   std::vector<std::string> monitored_controllers_;
@@ -317,6 +346,8 @@ private:
   SteadyClock::time_point list_sent_;
   SteadyClock::time_point switch_sent_;
   bool awaiting_verification_ = false;
+  bool expect_fallback_active_ = false;
+  SteadyClock::time_point switch_completed_;
   bool fallback_checked_ = false;
   std::optional<SteadyClock::time_point> last_state_update_;
   std::optional<int64_t> escalation_request_;
