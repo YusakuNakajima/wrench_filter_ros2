@@ -38,8 +38,18 @@ install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(class_loader REQUIRED)
   ament_add_gtest(test_iir_filter test/test_iir_filter.cpp)
   ament_add_gtest(test_watchdog_monitor test/test_watchdog_monitor.cpp)
+  # integration test against a fake controller_manager; its own ROS domain so that it never
+  # reaches a running robot's controller_manager
+  ament_add_gtest(test_wrench_watchdog_node test/test_wrench_watchdog_node.cpp
+    ENV ROS_DOMAIN_ID=96 TIMEOUT 120)
+  ament_target_dependencies(test_wrench_watchdog_node
+    rclcpp rclcpp_components class_loader geometry_msgs controller_manager_msgs std_srvs)
+  target_compile_definitions(test_wrench_watchdog_node PRIVATE
+    WATCHDOG_COMPONENT_LIBRARY="$<TARGET_FILE:wrench_watchdog_component>")
+  add_dependencies(test_wrench_watchdog_node wrench_watchdog_component)
 endif()
 
 ament_export_include_directories(include)

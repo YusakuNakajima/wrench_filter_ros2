@@ -49,7 +49,8 @@ URでは`/dashboard_client/stop`（プログラム停止）を指定する想定
 watchdogが力制御のコントローラを自動で再activateすることはありません。
 
 `fallback_controller`には、typeが`joint_trajectory_controller/JointTrajectoryController`または`ur_controllers/ScaledJointTrajectoryController`のコントローラだけを指定できます（完全一致で判定）。
-それ以外のtypeだった場合（速度・力のコントローラなど）は、最初の状態取得の時点でエラーを出し、以後はdeactivateだけを行います。
+typeは`list_controllers`の結果を受け取るたびに確認し直します（途中で同じ名前の別typeに入れ替えられた場合に備えるため）。
+それ以外のtypeだった場合（速度・力のコントローラなど）や、ロードされていない場合は、エラーを出してdeactivateだけを行います。
 activateされたときに今の位置を保持すると分かっているのは、joint trajectory controllerだけだからです。
 `monitored_controllers`に含まれる名前は`fallback_controller`に指定できません（起動時にエラー）。
 
@@ -88,7 +89,20 @@ URドライバでは、指令が来ないと停止します。
 ## テスト
 
 単体テストは、IIRの計算（scipyとの一致、安定性判定）と、watchdogの故障判定を対象にしています。
-ROSノード間の統合テストは含みません。onolab_ros2のUR7e模擬ハードウェアで手動確認した結果は次のとおりです（2026-10-11）。
+
+`test_wrench_watchdog_node`は、fakeのcontroller_manager（`list_controllers` / `switch_controller`）とエスカレーション用サービスを相手に、
+watchdogのコンポーネントを実際に読み込んで動かす統合テストです（`ROS_DOMAIN_ID=96`で実行）。次の場合を確認しています。
+
+- 入力が正常なら切り替えない／監視対象がinactiveなら入力が無くても切り替えない
+- stale・NaNで、監視対象をdeactivateしてfallbackをactivateする（STRICT）
+- switchが成功を返したのにfallbackがactiveにならない → エスカレーション
+- STRICTが拒否される → deactivateだけ（BEST_EFFORT）／それも拒否される → エスカレーション（1回）
+- fallbackのtypeが違う、または途中で別typeに入れ替えられた → fallbackはactivateしない
+- `fallback_controller`が`monitored_controllers`に含まれる → 起動時にエラー
+
+切り替え前に送った`list_controllers`の古い応答が、切り替え後に届く順序の入れ替わりは、テストで再現していません。
+
+onolab_ros2のUR7e模擬ハードウェアで手動確認した結果は次のとおりです（2026-10-11）。
 
 - フィルタのcontainerを`kill -9`したとき：52.8 msでstaleを検知し、56.6 msで`cartesian_compliance_controller`から`scaled_joint_trajectory_controller`への切り替えが完了した。手先の位置は変化しなかった
 - 模擬ハードウェアの力センサ値（NaN）しか来ない状態で`cartesian_compliance_controller`をactivateしたとき：フィルタはNaNを捨てて出力しないので、watchdogが「未受信」として即座にJTCへ切り替えた

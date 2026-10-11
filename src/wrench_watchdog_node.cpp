@@ -149,28 +149,17 @@ private:
       [this, sent](rclcpp::Client<ListControllers>::SharedFuture future) {
         list_request_.reset();
         // a response to a request sent before the switch completed cannot verify the switch
-        if (awaiting_verification_ && sent < switch_completed_) {return;}
+        if (awaiting_verification_ && sent <= switch_completed_) {return;}
         std::vector<std::string> active;
         bool fallback_active = false;
+        // checked on every response, since the fallback may be unloaded and reloaded as a
+        // different type while the watchdog runs
+        std::string fallback_type;
         try {
           for (const auto & c : future.get()->controller) {
-            if (c.name == fallback_controller_ && !fallback_checked_) {
-              fallback_checked_ = true;
-              // only a joint trajectory controller is known to hold the current position on
-              // activation; anything else (velocity / effort / force controller) is refused
-              if (std::find(
-                  kHoldingControllerTypes.begin(), kHoldingControllerTypes.end(), c.type) ==
-                kHoldingControllerTypes.end())
-              {
-                RCLCPP_ERROR(
-                  get_logger(), "fallback_controller '%s' has type '%s', which is not a joint "
-                  "trajectory controller; only deactivating on faults", c.name.c_str(),
-                  c.type.c_str());
-                fallback_controller_.clear();
-              }
-            }
-            if (c.name == fallback_controller_ && c.state == "active") {
-              fallback_active = true;
+            if (c.name == fallback_controller_) {
+              fallback_type = c.type;
+              fallback_active = c.state == "active";
             }
             if (c.state == "active" &&
               std::find(monitored_controllers_.begin(), monitored_controllers_.end(), c.name) !=
@@ -184,6 +173,30 @@ private:
           return;  // keep the last known state
         }
         active_monitored_ = active;
+        // only a joint trajectory controller is known to hold the current position on
+        // activation; anything else (velocity / effort / force controller) is refused
+        const bool usable = !fallback_controller_.empty() &&
+          std::find(
+          kHoldingControllerTypes.begin(), kHoldingControllerTypes.end(), fallback_type) !=
+          kHoldingControllerTypes.end();
+        if (!fallback_controller_.empty() && fallback_usable_ != usable) {
+          if (usable) {
+            RCLCPP_INFO(
+              get_logger(), "fallback_controller '%s' (%s) is available",
+              fallback_controller_.c_str(), fallback_type.c_str());
+          } else if (fallback_type.empty()) {
+            // normal right after start-up, before the spawner has loaded it
+            RCLCPP_WARN(
+              get_logger(), "fallback_controller '%s' is not loaded; only deactivating on faults",
+              fallback_controller_.c_str());
+          } else {
+            RCLCPP_ERROR(
+              get_logger(), "fallback_controller '%s' has type '%s', which is not a joint "
+              "trajectory controller; only deactivating on faults", fallback_controller_.c_str(),
+              fallback_type.c_str());
+          }
+        }
+        fallback_usable_ = usable;
         if (awaiting_verification_ && expect_fallback_active_ && !fallback_active) {
           // the switch reported ok but nothing is holding the position
           RCLCPP_ERROR(
@@ -240,9 +253,10 @@ private:
 
     std::string action = "deactivating";
     for (const auto & n : active_monitored_) {action += " " + n;}
-    if (!fallback_controller_.empty()) {action += ", activating " + fallback_controller_;}
+    const bool with_fallback = fallback_usable_.value_or(false);
+    if (with_fallback) {action += ", activating " + fallback_controller_;}
     RCLCPP_ERROR(get_logger(), "%s -> %s", to_string(fault).c_str(), action.c_str());
-    request_switch(active_monitored_, !fallback_controller_.empty());
+    request_switch(active_monitored_, with_fallback);
   }
 
   void request_switch(const std::vector<std::string> & deactivate, bool with_fallback)
@@ -348,7 +362,7 @@ private:
   bool awaiting_verification_ = false;
   bool expect_fallback_active_ = false;
   SteadyClock::time_point switch_completed_;
-  bool fallback_checked_ = false;
+  std::optional<bool> fallback_usable_;  // unknown until the first list_controllers response
   std::optional<SteadyClock::time_point> last_state_update_;
   std::optional<int64_t> escalation_request_;
   SteadyClock::time_point escalation_sent_;
