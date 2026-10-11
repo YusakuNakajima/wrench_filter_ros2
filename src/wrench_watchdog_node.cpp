@@ -197,10 +197,12 @@ private:
           }
         }
         fallback_usable_ = usable;
-        if (awaiting_verification_ && expect_fallback_active_ && !fallback_active) {
-          // the switch reported ok but nothing is holding the position
+        if (awaiting_verification_ && expect_fallback_active_ && (!fallback_active || !usable)) {
+          // the switch reported ok but nothing known to hold the position is active (e.g. the
+          // fallback was replaced by a controller of another type just before the switch)
           RCLCPP_ERROR(
-            get_logger(), "%s is not active after the switch", fallback_controller_.c_str());
+            get_logger(), "%s is not active as a joint trajectory controller after the switch",
+            fallback_controller_.c_str());
           escalate();
         }
         awaiting_verification_ = false;

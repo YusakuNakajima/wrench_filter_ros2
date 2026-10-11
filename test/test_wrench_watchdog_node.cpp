@@ -48,16 +48,24 @@ public:
   explicit FakeControllerManager(const std::string & ns)
   : node_(std::make_shared<rclcpp::Node>("fake_cm", ns))
   {
+    // deferred-response callback: while hold_list is set, a response is stored with the state at
+    // request time and only sent by release_list(), to reorder it after a switch
     list_ = node_->create_service<ListControllers>(
       "controller_manager/list_controllers",
-      [this](const std::shared_ptr<ListControllers::Request>,
-      std::shared_ptr<ListControllers::Response> res) {
+      [this](std::shared_ptr<rclcpp::Service<ListControllers>> service,
+      std::shared_ptr<rmw_request_id_t> header, const std::shared_ptr<ListControllers::Request>) {
+        ListControllers::Response res;
         for (const auto & c : controllers) {
           controller_manager_msgs::msg::ControllerState s;
           s.name = c.name;
           s.type = c.type;
           s.state = c.state;
-          res->controller.push_back(s);
+          res.controller.push_back(s);
+        }
+        if (hold_list) {
+          held_.emplace_back(header, res);
+        } else {
+          service->send_response(*header, res);
         }
       });
     switch_ = node_->create_service<SwitchController>(
@@ -65,6 +73,7 @@ public:
       [this](const std::shared_ptr<SwitchController::Request> req,
       std::shared_ptr<SwitchController::Response> res) {
         requests.push_back(*req);
+        request_times.push_back(std::chrono::steady_clock::now());
         res->ok = switch_handler(*req);
       });
     escalation_ = node_->create_service<Trigger>(
@@ -74,6 +83,14 @@ public:
         res->success = true;
       });
   }
+
+  void release_list()
+  {
+    for (auto & h : held_) {list_->send_response(*h.first, h.second);}
+    held_.clear();
+  }
+
+  size_t held_count() const {return held_.size();}
 
   FakeController * find(const std::string & name)
   {
@@ -103,6 +120,8 @@ public:
   rclcpp::Node::SharedPtr node_;
   std::vector<FakeController> controllers;
   std::vector<SwitchController::Request> requests;
+  std::vector<std::chrono::steady_clock::time_point> request_times;
+  bool hold_list = false;
   int escalations = 0;
   std::function<bool(const SwitchController::Request &)> switch_handler =
     [this](const SwitchController::Request & r) {return apply(r);};
@@ -111,6 +130,7 @@ private:
   rclcpp::Service<ListControllers>::SharedPtr list_;
   rclcpp::Service<SwitchController>::SharedPtr switch_;
   rclcpp::Service<Trigger>::SharedPtr escalation_;
+  std::vector<std::pair<std::shared_ptr<rmw_request_id_t>, ListControllers::Response>> held_;
 };
 
 class WrenchWatchdogTest : public ::testing::Test
@@ -222,16 +242,23 @@ TEST_F(WrenchWatchdogTest, StaleInputSwitchesToFallback)
   EXPECT_EQ(cm_->escalations, 0);
 }
 
-TEST_F(WrenchWatchdogTest, NonFiniteInputSwitches)
+TEST_F(WrenchWatchdogTest, NonFiniteInputSwitchesBeforeStaleTimeout)
 {
   start_watchdog();
-  const auto end = std::chrono::steady_clock::now() + 500ms;
+  spin_healthy(300ms);  // reception established
+  ASSERT_TRUE(cm_->requests.empty());
+
+  // keep publishing at 500 Hz, but NaN: the input is never stale, only non-finite
+  const auto nan_start = std::chrono::steady_clock::now();
+  const auto end = nan_start + 300ms;
   while (std::chrono::steady_clock::now() < end) {
     publish(std::numeric_limits<double>::quiet_NaN());
     executor_.spin_some(1ms);
     std::this_thread::sleep_for(2ms);
   }
   ASSERT_GE(cm_->requests.size(), 1u);
+  // detected from the NaN itself, well before the 50 ms stale timeout would expire
+  EXPECT_LT(cm_->request_times[0] - nan_start, 40ms);
   EXPECT_EQ(cm_->find("cartesian_force_controller")->state, "inactive");
   EXPECT_EQ(cm_->find("scaled_joint_trajectory_controller")->state, "active");
 }
@@ -298,6 +325,40 @@ TEST_F(WrenchWatchdogTest, FallbackReloadedAsWrongTypeIsNotActivated)
   ASSERT_GE(cm_->requests.size(), 1u);
   for (const auto & r : cm_->requests) {EXPECT_TRUE(r.activate_controllers.empty());}
   EXPECT_EQ(cm_->find("scaled_joint_trajectory_controller")->state, "inactive");
+}
+
+TEST_F(WrenchWatchdogTest, FallbackReplacedDuringSwitchEscalates)
+{
+  // the fallback is replaced by a force controller of the same name just before the switch
+  cm_->switch_handler = [this](const SwitchController::Request & r) {
+      cm_->find("scaled_joint_trajectory_controller")->type = kForceType;
+      return cm_->apply(r);
+    };
+  start_watchdog();
+  spin_healthy(300ms);
+  spin_for(500ms);
+  ASSERT_EQ(cm_->requests.size(), 1u);
+  EXPECT_EQ(cm_->escalations, 1);
+}
+
+TEST_F(WrenchWatchdogTest, ListResponseSentBeforeSwitchDoesNotVerifyIt)
+{
+  start_watchdog();
+  spin_healthy(300ms);
+  // a list request is held with the pre-switch state (fallback inactive) ...
+  cm_->hold_list = true;
+  spin_healthy(30ms);
+  ASSERT_GE(cm_->held_count(), 1u);
+  // ... the input stops and the switch completes while that response is still pending
+  spin_for(150ms);
+  ASSERT_EQ(cm_->requests.size(), 1u);
+  ASSERT_EQ(cm_->find("scaled_joint_trajectory_controller")->state, "active");
+  // the old response arrives after the switch: it must not be taken as "fallback inactive"
+  cm_->hold_list = false;
+  cm_->release_list();
+  spin_for(300ms);
+  EXPECT_EQ(cm_->escalations, 0);
+  EXPECT_EQ(cm_->requests.size(), 1u);
 }
 
 TEST_F(WrenchWatchdogTest, InactiveMonitoredControllerIsNotSwitched)
