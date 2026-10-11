@@ -361,6 +361,31 @@ TEST_F(WrenchWatchdogTest, ListResponseSentBeforeSwitchDoesNotVerifyIt)
   EXPECT_EQ(cm_->requests.size(), 1u);
 }
 
+TEST_F(WrenchWatchdogTest, VerificationResumesAfterDiscardingPreSwitchResponse)
+{
+  // the switch reports ok but leaves the fallback inactive: the released pre-switch response
+  // must not decide the verification, a fresh response afterwards must (and escalate)
+  cm_->switch_handler = [this](const SwitchController::Request & r) {
+      for (const auto & n : r.deactivate_controllers) {cm_->find(n)->state = "inactive";}
+      return true;
+    };
+  start_watchdog();
+  spin_healthy(300ms);
+  cm_->hold_list = true;
+  spin_healthy(30ms);
+  ASSERT_GE(cm_->held_count(), 1u);
+  spin_for(150ms);
+  ASSERT_EQ(cm_->requests.size(), 1u);
+  EXPECT_EQ(cm_->escalations, 0);  // still waiting for a post-switch response
+
+  cm_->release_list();
+  spin_for(5ms);
+  EXPECT_EQ(cm_->escalations, 0);  // the pre-switch response alone does not escalate
+  cm_->hold_list = false;
+  spin_for(300ms);
+  EXPECT_EQ(cm_->escalations, 1);  // the fresh response shows the fallback inactive
+}
+
 TEST_F(WrenchWatchdogTest, InactiveMonitoredControllerIsNotSwitched)
 {
   cm_->find("cartesian_force_controller")->state = "inactive";

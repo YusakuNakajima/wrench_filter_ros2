@@ -96,7 +96,7 @@ watchdogのコンポーネントを実際に読み込んで動かす統合テス
 - 入力が正常なら切り替えない／監視対象がinactiveなら入力が無くても切り替えない
 - stale・NaNで、監視対象をdeactivateしてfallbackをactivateする（STRICT）。NaNは、正常な受信を確立したあとに500 Hzで送り続け、staleの期限（50 ms）より前に切り替わることを確認
 - switchが成功を返したのにfallbackがactiveにならない、またはswitchの直前にfallbackが別typeに入れ替えられた → エスカレーション
-- switch前に送った`list_controllers`の応答が、switch後に届く（順序の入れ替わり） → その応答では検証せず、エスカレーションしない
+- switch前に送った`list_controllers`の応答が、switch後に届く（順序の入れ替わり） → その応答では検証せず、エスカレーションしない。そのあと新しく取得した応答で検証を再開する
 - STRICTが拒否される → deactivateだけ（BEST_EFFORT）／それも拒否される → エスカレーション（1回）
 - fallbackのtypeが違う、または途中で別typeに入れ替えられた → fallbackはactivateしない
 - `fallback_controller`が`monitored_controllers`に含まれる → 起動時にエラー
