@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>wrench_filter</name>
+  <version>0.1.0</version>
+  <description>
+    Low-pass filter for WrenchStamped that drops NaN/Inf samples, and a watchdog that switches
+    force-feedback ros2_control controllers to a position-holding controller when their wrench
+    input is missing, stale or non-finite.
+  </description>
+  <maintainer email="yusaku.kek@gmail.com">Yusaku Nakajima</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_components</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>controller_manager_msgs</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
