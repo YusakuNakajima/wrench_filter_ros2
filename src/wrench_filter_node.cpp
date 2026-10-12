@@ -5,7 +5,9 @@
 // Ported from grinding_force_torque::WrenchFilter (powder_grinding_ros2 344d0cc). Changes:
 //   - samples containing NaN/Inf are dropped (not filtered, not published) so that they do not
 //     corrupt the IIR state; the output simply stops, which the wrench_watchdog detects as stale
-//   - filter_b / filter_a are required (no placeholder default coefficients)
+//   - the Butterworth coefficients are designed in the node from sampling_frequency_hz (required,
+//     no default), cutoff_frequency_hz (required) and filter_order, instead of passing filter_b /
+//     filter_a (placeholder default coefficients removed)
 //   - zeroing readiness counts samples instead of keeping a deque
 
 #include <array>
@@ -19,6 +21,7 @@
 #include <rclcpp_components/register_node_macro.hpp>
 #include <std_srvs/srv/empty.hpp>
 
+#include "wrench_filter/butterworth.hpp"
 #include "wrench_filter/iir_filter.hpp"
 
 namespace wrench_filter
@@ -69,13 +72,13 @@ public:
     }
     initial_zero_ = declare_parameter<bool>("initial_zero", true);
     disable_filtering_ = declare_parameter<bool>("disable_filtering", false);
-    // Butterworth coefficients designed for the actual message rate of input_topic,
-    // e.g. scipy.signal.butter(order, cutoff_hz / (0.5 * sampling_hz))
-    const auto b = declare_parameter<std::vector<double>>("filter_b", std::vector<double>{});
-    const auto a = declare_parameter<std::vector<double>>("filter_a", std::vector<double>{});
-    if (b.empty() || a.empty()) {
-      throw std::invalid_argument("parameters filter_b and filter_a are required");
-    }
+    // The filter advances one step per received message, so sampling_frequency_hz must be the
+    // actual message rate of input_topic. It has no default on purpose: a wrong rate silently
+    // shifts the cutoff (e.g. 100 Hz assumed for a 500 Hz topic makes it 5x higher).
+    const double sampling_hz = required_double("sampling_frequency_hz");
+    const double cutoff_hz = required_double("cutoff_frequency_hz");
+    const int order = declare_parameter<int>("filter_order", 3);
+    const auto [b, a] = butterworth_lowpass(order, cutoff_hz, sampling_hz);
     for (int i = 0; i < 6; ++i) {
       filters_.emplace_back(b, a);
     }
@@ -91,12 +94,27 @@ public:
         std::shared_ptr<std_srvs::srv::Empty::Response>) {zero();});
 
     RCLCPP_INFO(
-      get_logger(), "%s -> %s (filtering %s, initial_zero %s)", input_topic.c_str(),
-      output_topic.c_str(), disable_filtering_ ? "disabled" : "enabled",
+      get_logger(), "%s -> %s (filtering %s: order %d, cutoff %.3f Hz at %.3f Hz input; "
+      "initial_zero %s)", input_topic.c_str(), output_topic.c_str(),
+      disable_filtering_ ? "disabled" : "enabled", order, cutoff_hz, sampling_hz,
       initial_zero_ ? "true" : "false");
   }
 
 private:
+  // a double parameter without a default value; start-up fails if it is not given
+  double required_double(const std::string & name)
+  {
+    rcl_interfaces::msg::ParameterDescriptor descriptor;
+    descriptor.dynamic_typing = false;
+    declare_parameter(name, rclcpp::ParameterType::PARAMETER_DOUBLE, descriptor);
+    try {
+      return get_parameter(name).as_double();
+    } catch (const std::exception &) {
+      // not given (ParameterUninitializedException) or not a double
+      throw std::invalid_argument("parameter " + name + " (double) is required");
+    }
+  }
+
   void on_wrench(const geometry_msgs::msg::WrenchStamped & msg)
   {
     const Wrench6 input = from_msg(msg.wrench);

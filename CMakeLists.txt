@@ -40,6 +40,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(class_loader REQUIRED)
   ament_add_gtest(test_iir_filter test/test_iir_filter.cpp)
+  ament_add_gtest(test_butterworth test/test_butterworth.cpp)
   ament_add_gtest(test_watchdog_monitor test/test_watchdog_monitor.cpp)
   # integration test against a fake controller_manager; its own ROS domain so that it never
   # reaches a running robot's controller_manager

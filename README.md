@@ -15,17 +15,23 @@
 | --- | --- | --- | --- |
 | `input_topic` | string | `wrench_raw` | 入力 |
 | `output_topic` | string | `wrench_filtered` | 出力。ゼロ点合わせサービスは`<output_topic>/zero_ftsensor`（`std_srvs/Empty`） |
-| `filter_b`, `filter_a` | double[] | なし（必須） | IIRの係数（`scipy.signal.butter`と同じ形式）。**入力トピックが実際に届く周期で設計すること** |
+| `sampling_frequency_hz` | double / Hz | なし（**必須**） | 入力トピックが実際に届く周期。指定しないと起動に失敗する。`500`ではなく`500.0`のようにdoubleで渡すこと |
+| `cutoff_frequency_hz` | double / Hz | なし（**必須**） | Butterworthローパスのカットオフ。(0, `sampling_frequency_hz`/2) |
+| `filter_order` | int | 3 | Butterworthの次数。[1, 8] |
 | `data_window` | int / サンプル | 100 | ゼロ点合わせを許可するまでに受信が必要なサンプル数 |
 | `initial_zero` | bool | true | `data_window`サンプル受信後に、自動でゼロ点を合わせる。合わせるまでは出力しない |
 | `disable_filtering` | bool | false | フィルタを通さず、オフセットだけを引く |
 
-フィルタは、メッセージを1通受け取るたびに1段進みます。そのため係数は、センサ内部の更新周期ではなく、入力トピックの周期で設計してください。
+係数は、ノードの中で`scipy.signal.butter(filter_order, cutoff_frequency_hz / (0.5 * sampling_frequency_hz))`と同じ計算で求めます（scipy 1.15.3と一致することをテストで確認）。
+フィルタは、メッセージを1通受け取るたびに1段進みます。そのため`sampling_frequency_hz`には、センサ内部の更新周期ではなく、入力トピックが実際に届く周期を指定してください。
+既定値を持たせていないのは、周期が合わないとカットオフが黙ってずれるためです（例：500 Hzのトピックを100 Hzとして設計すると、カットオフは5倍になる）。
+
+次数が高くカットオフが低いと、係数（伝達関数の形）が数値的に不安定になります。例えば次数8・カットオフ5 Hz・入力500 Hzでは、直流ゲインに約3e-5の誤差が出ます（scipyの係数でも約3e-6）。通常は既定の3次で使ってください。
 
 移植元からの変更点:
 
 - **NaN/Infを含むサンプルは捨てます。** フィルタにも通さず、出力もしません。IIRの内部状態にNaNが入ると、その後の出力がすべてNaNになってしまうためです。出力が止まったことは、`WrenchWatchdog`がstaleとして検知します。
-- `filter_b` / `filter_a`は必須です。移植元にあった例示用の係数（既定値）は削除しました。
+- 係数（`filter_b` / `filter_a`）を渡す代わりに、`sampling_frequency_hz`・`cutoff_frequency_hz`（どちらも必須）・`filter_order`からノードの中で計算します。移植元にあった例示用の係数（既定値）は削除しました。
 - `initial_zero`がtrueのときは、ゼロ点を合わせる前の値（オフセットが引かれていない値）を出力しません。
 
 ## WrenchWatchdog
@@ -77,7 +83,7 @@ URドライバでは、指令が来ないと停止します。
 | `switch_timeout_ms` | double / ms | 1000.0 | switch要求のタイムアウト |
 
 周期とタイムアウトは、有限で(0, 60000] msの範囲にある必要があります。範囲外ならノードの起動に失敗します。
-`WrenchFilter`は、`data_window < 1`のとき、または`filter_a`の極が単位円の上か外にある（不安定な）ときに、起動に失敗します。
+`WrenchFilter`は、`sampling_frequency_hz`・`cutoff_frequency_hz`が無いか範囲外のとき、`filter_order`が範囲外のとき、`data_window < 1`のとき、または計算した係数の極が単位円の上か外にある（不安定な）ときに、起動に失敗します。
 
 ### 限界
 
@@ -88,7 +94,7 @@ URドライバでは、指令が来ないと停止します。
 
 ## テスト
 
-単体テストは、IIRの計算（scipyとの一致、安定性判定）と、watchdogの故障判定を対象にしています。
+単体テストは、Butterworthの係数設計（scipyとの一致）、IIRの計算（scipyとの一致、安定性判定）、watchdogの故障判定を対象にしています。
 
 `test_wrench_watchdog_node`は、fakeのcontroller_manager（`list_controllers` / `switch_controller`）とエスカレーション用サービスを相手に、
 watchdogのコンポーネントを実際に読み込んで動かす統合テストです（`ROS_DOMAIN_ID=96`で実行）。次の場合を確認しています。
