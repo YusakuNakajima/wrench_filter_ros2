@@ -197,6 +197,14 @@ private:
           }
         }
         fallback_usable_ = usable;
+        if (awaiting_verification_ && !active.empty()) {
+          // the switch reported ok but a monitored controller is still active, so it may keep
+          // acting on the faulty input (the switch is also retried by check())
+          std::string still;
+          for (const auto & n : active) {still += " " + n;}
+          RCLCPP_ERROR(get_logger(), "Still active after the switch:%s", still.c_str());
+          escalate();
+        }
         if (awaiting_verification_ && expect_fallback_active_ && (!fallback_active || !usable)) {
           // the switch reported ok but nothing known to hold the position is active (e.g. the
           // fallback was replaced by a controller of another type just before the switch)

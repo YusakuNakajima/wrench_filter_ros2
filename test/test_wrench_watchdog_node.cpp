@@ -277,6 +277,44 @@ TEST_F(WrenchWatchdogTest, OkSwitchWithoutActiveFallbackEscalates)
   EXPECT_EQ(cm_->escalations, 1);
 }
 
+TEST_F(WrenchWatchdogTest, EmptyFallbackOnlyDeactivates)
+{
+  start_watchdog("");
+  spin_healthy(300ms);
+  spin_for(500ms);
+  ASSERT_EQ(cm_->requests.size(), 1u);
+  EXPECT_EQ(cm_->requests[0].strictness, SwitchController::Request::BEST_EFFORT);
+  EXPECT_TRUE(cm_->requests[0].activate_controllers.empty());
+  EXPECT_EQ(cm_->find("cartesian_force_controller")->state, "inactive");
+  EXPECT_EQ(cm_->find("scaled_joint_trajectory_controller")->state, "inactive");
+  EXPECT_EQ(cm_->escalations, 0);
+}
+
+TEST_F(WrenchWatchdogTest, OkSwitchLeavingMonitoredActiveEscalates)
+{
+  // the switch reports ok, but the monitored controller stays active
+  cm_->switch_handler = [](const SwitchController::Request &) {return true;};
+  start_watchdog("");
+  spin_healthy(300ms);
+  spin_for(500ms);
+  ASSERT_GE(cm_->requests.size(), 1u);
+  EXPECT_EQ(cm_->escalations, 1);
+}
+
+TEST_F(WrenchWatchdogTest, OkSwitchLeavingMonitoredActiveEscalatesWithFallback)
+{
+  // the fallback becomes active, but the monitored controller stays active too
+  cm_->switch_handler = [this](const SwitchController::Request & r) {
+      for (const auto & n : r.activate_controllers) {cm_->find(n)->state = "active";}
+      return true;
+    };
+  start_watchdog();
+  spin_healthy(300ms);
+  spin_for(500ms);
+  ASSERT_GE(cm_->requests.size(), 1u);
+  EXPECT_EQ(cm_->escalations, 1);
+}
+
 TEST_F(WrenchWatchdogTest, RejectedStrictSwitchFallsBackToDeactivateOnly)
 {
   cm_->switch_handler = [this](const SwitchController::Request & r) {

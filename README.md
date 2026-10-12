@@ -62,6 +62,7 @@ activateされたときに今の位置を保持すると分かっているのは
 `monitored_controllers`に含まれる名前は`fallback_controller`に指定できません（起動時にエラー）。
 
 switchが成功を返しても、そのあとに送った`list_controllers`の結果で`fallback_controller`がactiveになっていなければ、`escalation_service`を呼びます。
+同じく、そのあとの`list_controllers`の結果で監視対象がまだactiveなら、`fallback_controller`の有無によらず`escalation_service`を呼びます（switchのやり直しも続けます）。
 
 一度でもコントローラの状態を取得できたあとに、`list_controllers`が500 ms以上応答しなくなった場合は、監視対象がactiveかどうか分かりません。この状態で入力の異常があれば、`escalation_service`を呼びます。
 起動直後（まだ一度も状態を取得できていない間）は、起動のたびにロボットを止めてしまわないよう、エスカレーションしません。
@@ -103,6 +104,8 @@ watchdogのコンポーネントを実際に読み込んで動かす統合テス
 - 入力が正常なら切り替えない／監視対象がinactiveなら入力が無くても切り替えない
 - stale・NaNで、監視対象をdeactivateしてfallbackをactivateする（STRICT）。NaNは、正常な受信を確立したあとに500 Hzで送り続け、staleの期限（50 ms）より前に切り替わることを確認
 - switchが成功を返したのにfallbackがactiveにならない、またはswitchの直前にfallbackが別typeに入れ替えられた → エスカレーション
+- switchが成功を返したのに監視対象がactiveのまま（fallbackあり・なしの両方） → エスカレーション
+- `fallback_controller`が空 → deactivateだけ（BEST_EFFORT）で、何もactivateしない
 - switch前に送った`list_controllers`の応答が、switch後に届く（順序の入れ替わり） → その応答では検証せず、エスカレーションしない。そのあと新しく取得した応答で検証を再開する
 - STRICTが拒否される → deactivateだけ（BEST_EFFORT）／それも拒否される → エスカレーション（1回）
 - fallbackのtypeが違う、または途中で別typeに入れ替えられた → fallbackはactivateしない
