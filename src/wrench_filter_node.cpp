@@ -5,9 +5,9 @@
 // Ported from grinding_force_torque::WrenchFilter (powder_grinding_ros2 344d0cc). Changes:
 //   - samples containing NaN/Inf are dropped (not filtered, not published) so that they do not
 //     corrupt the IIR state; the output simply stops, which the wrench_watchdog detects as stale
-//   - the Butterworth coefficients are designed in the node from sampling_frequency_hz (required,
-//     no default), cutoff_frequency_hz (required) and filter_order, instead of passing filter_b /
-//     filter_a (placeholder default coefficients removed)
+//   - the Butterworth filter is designed in the node from sampling_frequency_hz (required, no
+//     default), cutoff_frequency_hz (required) and filter_order, as second-order sections in
+//     cascade, instead of passing filter_b / filter_a (placeholder default coefficients removed)
 //   - zeroing readiness counts samples instead of keeping a deque
 
 #include <array>
@@ -78,9 +78,11 @@ public:
     const double sampling_hz = required_double("sampling_frequency_hz");
     const double cutoff_hz = required_double("cutoff_frequency_hz");
     const int order = declare_parameter<int>("filter_order", 3);
-    const auto [b, a] = butterworth_lowpass(order, cutoff_hz, sampling_hz);
-    for (int i = 0; i < 6; ++i) {
-      filters_.emplace_back(b, a);
+    // second-order sections in cascade (one cascade per axis)
+    const auto sections = butterworth_lowpass_sos(order, cutoff_hz, sampling_hz);
+    filters_.resize(6);
+    for (auto & cascade : filters_) {
+      for (const auto & sec : sections) {cascade.emplace_back(sec.b, sec.a);}
     }
 
     publisher_ = create_publisher<geometry_msgs::msg::WrenchStamped>(output_topic, 10);
@@ -128,7 +130,11 @@ private:
     }
 
     for (int i = 0; i < 6; ++i) {
-      filtered_[i] = disable_filtering_ ? input[i] : filters_[i].filter(input[i]);
+      double y = input[i];
+      if (!disable_filtering_) {
+        for (auto & f : filters_[i]) {y = f.filter(y);}
+      }
+      filtered_[i] = y;
     }
     ++received_;
 
@@ -174,7 +180,7 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>::SharedPtr publisher_;
   rclcpp::Service<std_srvs::srv::Empty>::SharedPtr zero_service_;
 
-  std::vector<IirFilter> filters_;
+  std::vector<std::vector<IirFilter>> filters_;  // [axis][section]
   Wrench6 filtered_{};
   Wrench6 offset_{};
   int data_window_;

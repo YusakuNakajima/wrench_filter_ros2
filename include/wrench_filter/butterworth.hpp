@@ -1,8 +1,13 @@
 // Copyright (c) 2026 Yusaku Nakajima, MIT License
 //
-// Digital Butterworth low-pass design, equivalent to
-//   scipy.signal.butter(order, cutoff_hz / (0.5 * sampling_hz))
+// Digital Butterworth low-pass design as second-order sections (SOS), with the same poles,
+// zeros and overall gain as
+//   scipy.signal.butter(order, cutoff_hz / (0.5 * sampling_hz), output="sos")
 // (analog prototype -> pre-warped cutoff -> bilinear transform).
+//
+// The transfer-function form (one polynomial b / a) is not used: with a high order and a low
+// cutoff its coefficients lose precision (e.g. order 6, 0.5 Hz at 500 Hz: DC gain 0.985).
+// Each section here has its DC gain set to exactly 1 from its own coefficients.
 
 #ifndef WRENCH_FILTER__BUTTERWORTH_HPP_
 #define WRENCH_FILTER__BUTTERWORTH_HPP_
@@ -10,7 +15,6 @@
 #include <cmath>
 #include <complex>
 #include <stdexcept>
-#include <utility>
 #include <vector>
 
 namespace wrench_filter
@@ -18,8 +22,16 @@ namespace wrench_filter
 
 constexpr int kMaxButterworthOrder = 8;
 
-// Returns {b, a} (a[0] == 1). sampling_hz: rate at which samples are fed to the filter [Hz].
-inline std::pair<std::vector<double>, std::vector<double>> butterworth_lowpass(
+struct Section
+{
+  std::vector<double> b;  // numerator
+  std::vector<double> a;  // denominator, a[0] == 1
+};
+
+// Returns ceil(order / 2) sections: second-order ones (a conjugate pole pair, double zero at
+// z = -1) and, for an odd order, one first-order section (real pole, zero at z = -1).
+// sampling_hz: rate at which samples are fed to the filter [Hz].
+inline std::vector<Section> butterworth_lowpass_sos(
   int order, double cutoff_hz, double sampling_hz)
 {
   if (order < 1 || order > kMaxButterworthOrder) {
@@ -40,31 +52,32 @@ inline std::pair<std::vector<double>, std::vector<double>> butterworth_lowpass(
   const double fs2 = 4.0;  // 2 * fs
   const double warped = fs2 * std::tan(kPi * wn / 2.0);
 
-  // analog prototype poles (unit cutoff), scaled to the warped cutoff, then bilinear-mapped
-  std::vector<C> poles;
-  C denominator = 1.0;
-  for (int k = 0; k < order; ++k) {
-    const double theta = kPi * (2.0 * k - order + 1) / (2.0 * order);
-    const C p = -std::exp(C(0.0, theta)) * warped;
-    denominator *= fs2 - p;
-    poles.push_back((fs2 + p) / (fs2 - p));
-  }
-  const double gain = std::pow(warped, order) * (C(1.0) / denominator).real();
+  // analog prototype pole k: -exp(j * pi * (2k - order + 1) / (2 order)), scaled and mapped.
+  // k and order - 1 - k are a conjugate pair; for an odd order, k = (order - 1) / 2 is real.
+  auto digital_pole = [&](int k) {
+      const double theta = kPi * (2.0 * k - order + 1) / (2.0 * order);
+      const C p = -std::exp(C(0.0, theta)) * warped;
+      return (fs2 + p) / (fs2 - p);
+    };
 
-  // a = poly(poles); all zeros are at z = -1, so b = gain * binomial coefficients
-  std::vector<C> a_c(order + 1, C(0.0));
-  a_c[0] = 1.0;
-  for (int i = 0; i < order; ++i) {
-    for (int j = i + 1; j >= 1; --j) {a_c[j] -= poles[i] * a_c[j - 1];}
+  std::vector<Section> sections;
+  for (int k = 0; k < order / 2; ++k) {
+    const C z = digital_pole(k);
+    Section s;
+    s.a = {1.0, -2.0 * z.real(), std::norm(z)};
+    const double dc = (s.a[0] + s.a[1] + s.a[2]) / 4.0;  // b = dc * [1, 2, 1] -> unity DC gain
+    s.b = {dc, 2.0 * dc, dc};
+    sections.push_back(s);
   }
-  std::vector<double> a(order + 1), b(order + 1);
-  double binomial = 1.0;
-  for (int i = 0; i <= order; ++i) {
-    a[i] = a_c[i].real();
-    b[i] = gain * binomial;
-    binomial = binomial * (order - i) / (i + 1);
+  if (order % 2 == 1) {
+    const double z = digital_pole((order - 1) / 2).real();
+    Section s;
+    s.a = {1.0, -z};
+    const double dc = (1.0 - z) / 2.0;  // b = dc * [1, 1]
+    s.b = {dc, dc};
+    sections.push_back(s);
   }
-  return {b, a};
+  return sections;
 }
 
 }  // namespace wrench_filter

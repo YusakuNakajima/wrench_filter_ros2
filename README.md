@@ -22,16 +22,17 @@
 | `initial_zero` | bool | true | `data_window`サンプル受信後に、自動でゼロ点を合わせる。合わせるまでは出力しない |
 | `disable_filtering` | bool | false | フィルタを通さず、オフセットだけを引く |
 
-係数は、ノードの中で`scipy.signal.butter(filter_order, cutoff_frequency_hz / (0.5 * sampling_frequency_hz))`と同じ計算で求めます（scipy 1.15.3と一致することをテストで確認）。
+フィルタはノードの中で設計します。極・零点・全体のゲインは`scipy.signal.butter(filter_order, cutoff_frequency_hz / (0.5 * sampling_frequency_hz))`と同じです（scipy 1.15.3と一致することをテストで確認）。
+ただし1本の多項式（伝達関数の形）ではなく、2次セクション（SOS）の縦続として計算します。伝達関数の形は、次数が高くカットオフが低いと係数の桁が落ち、例えば次数6・カットオフ0.5 Hz・入力500 Hzでは直流ゲインが0.985になります（力を1.5 %過小評価する）。
+各セクションの直流ゲインを、そのセクション自身の係数からちょうど1にしているので、許可している範囲（次数1〜8）全体で直流ゲインは1になります。
 フィルタは、メッセージを1通受け取るたびに1段進みます。そのため`sampling_frequency_hz`には、センサ内部の更新周期ではなく、入力トピックが実際に届く周期を指定してください。
 既定値を持たせていないのは、周期が合わないとカットオフが黙ってずれるためです（例：500 Hzのトピックを100 Hzとして設計すると、カットオフは5倍になる）。
 
-次数が高くカットオフが低いと、係数（伝達関数の形）が数値的に不安定になります。例えば次数8・カットオフ5 Hz・入力500 Hzでは、直流ゲインに約3e-5の誤差が出ます（scipyの係数でも約3e-6）。通常は既定の3次で使ってください。
 
 移植元からの変更点:
 
 - **NaN/Infを含むサンプルは捨てます。** フィルタにも通さず、出力もしません。IIRの内部状態にNaNが入ると、その後の出力がすべてNaNになってしまうためです。出力が止まったことは、`WrenchWatchdog`がstaleとして検知します。
-- 係数（`filter_b` / `filter_a`）を渡す代わりに、`sampling_frequency_hz`・`cutoff_frequency_hz`（どちらも必須）・`filter_order`からノードの中で計算します。移植元にあった例示用の係数（既定値）は削除しました。
+- 係数（`filter_b` / `filter_a`）を渡す代わりに、`sampling_frequency_hz`・`cutoff_frequency_hz`（どちらも必須）・`filter_order`からノードの中で、2次セクションの縦続として設計します。移植元にあった例示用の係数（既定値）は削除しました。
 - `initial_zero`がtrueのときは、ゼロ点を合わせる前の値（オフセットが引かれていない値）を出力しません。
 
 ## WrenchWatchdog
@@ -94,7 +95,7 @@ URドライバでは、指令が来ないと停止します。
 
 ## テスト
 
-単体テストは、Butterworthの係数設計（scipyとの一致）、IIRの計算（scipyとの一致、安定性判定）、watchdogの故障判定を対象にしています。
+単体テストは、Butterworthの設計（scipyとの一致、許可範囲全体での直流ゲイン1と安定性）、IIRの計算（scipyとの一致、安定性判定）、watchdogの故障判定を対象にしています。
 
 `test_wrench_watchdog_node`は、fakeのcontroller_manager（`list_controllers` / `switch_controller`）とエスカレーション用サービスを相手に、
 watchdogのコンポーネントを実際に読み込んで動かす統合テストです（`ROS_DOMAIN_ID=96`で実行）。次の場合を確認しています。

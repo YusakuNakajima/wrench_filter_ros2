@@ -8,11 +8,23 @@
 #include <vector>
 
 #include "wrench_filter/butterworth.hpp"
+#include "wrench_filter/iir_filter.hpp"
 
-using wrench_filter::butterworth_lowpass;
+using wrench_filter::butterworth_lowpass_sos;
+using wrench_filter::IirFilter;
+using wrench_filter::Section;
 
 namespace
 {
+
+std::vector<double> convolve(const std::vector<double> & x, const std::vector<double> & y)
+{
+  std::vector<double> r(x.size() + y.size() - 1, 0.0);
+  for (size_t i = 0; i < x.size(); ++i) {
+    for (size_t j = 0; j < y.size(); ++j) {r[i + j] += x[i] * y[j];}
+  }
+  return r;
+}
 
 struct Case
 {
@@ -23,7 +35,8 @@ struct Case
   std::vector<double> a;
 };
 
-// references: scipy 1.15.3, scipy.signal.butter(order, cutoff_hz / (0.5 * sampling_hz))
+// references: scipy 1.15.3, scipy.signal.butter(order, cutoff_hz / (0.5 * sampling_hz)).
+// Only configurations whose transfer-function form is well conditioned are compared this way.
 const std::vector<Case> kCases{
   {3, 20.0, 500.0,
     {0.0015670103505882685, 0.004701031051764806, 0.004701031051764806, 0.0015670103505882685},
@@ -40,24 +53,35 @@ const std::vector<Case> kCases{
       0.5418685129373998, 0.10837370258747996},
     {1.0, 0.9853252392792378, 0.9738493318367639, 0.3863565586484487, 0.11116384057834201,
       0.011263512456565873}},
-  {8, 5.0, 500.0,
-    {8.098259786747707e-13, 6.478607829398165e-12, 2.267512740289358e-11, 4.535025480578716e-11,
-      5.6687818507233944e-11, 4.535025480578716e-11, 2.267512740289358e-11,
-      6.478607829398165e-12, 8.098259786747707e-13},
-    {1.0, -7.677940205392836, 25.797219528171233, -49.54122563778755, 59.47613197003973,
-      -45.7087344779167, 21.960120132116103, -6.0301722352443194, 0.7246009262216517}},
 };
+
+// the response of the cascade to a constant input after `samples` samples
+double cascade_step(const std::vector<Section> & sections, int samples)
+{
+  std::vector<IirFilter> filters;
+  for (const auto & s : sections) {filters.emplace_back(s.b, s.a);}
+  double y = 0.0;
+  for (int i = 0; i < samples; ++i) {
+    y = 1.0;
+    for (auto & f : filters) {y = f.filter(y);}
+  }
+  return y;
+}
 
 }  // namespace
 
-TEST(Butterworth, MatchesScipy)
+TEST(Butterworth, CascadeMatchesScipyTransferFunction)
 {
   for (const auto & c : kCases) {
-    const auto [b, a] = butterworth_lowpass(c.order, c.cutoff_hz, c.sampling_hz);
+    const auto sections = butterworth_lowpass_sos(c.order, c.cutoff_hz, c.sampling_hz);
+    ASSERT_EQ(sections.size(), static_cast<size_t>((c.order + 1) / 2));
+    std::vector<double> b{1.0}, a{1.0};
+    for (const auto & s : sections) {
+      b = convolve(b, s.b);
+      a = convolve(a, s.a);
+    }
     ASSERT_EQ(b.size(), c.b.size());
-    ASSERT_EQ(a.size(), c.a.size());
     for (size_t i = 0; i < b.size(); ++i) {
-      // relative tolerance: the order-8 coefficients span 1e-13 .. 60
       EXPECT_NEAR(b[i], c.b[i], 1e-9 * std::abs(c.b[i])) << "order " << c.order << " b" << i;
       EXPECT_NEAR(a[i], c.a[i], 1e-9 * std::max(1.0, std::abs(c.a[i])))
         << "order " << c.order << " a" << i;
@@ -65,27 +89,38 @@ TEST(Butterworth, MatchesScipy)
   }
 }
 
-TEST(Butterworth, UnityDcGain)
+TEST(Butterworth, UnityDcGainOverTheWholeAllowedRange)
 {
-  for (const auto & c : kCases) {
-    const auto [b, a] = butterworth_lowpass(c.order, c.cutoff_hz, c.sampling_hz);
-    double sb = 0.0, sa = 0.0;
-    for (double v : b) {sb += v;}
-    for (double v : a) {sa += v;}
-    // a high order with a low cutoff is ill-conditioned in transfer-function form
-    // (order 8, 5 Hz at 500 Hz: sum(a) ~ 2e-10; scipy's own coefficients give 1 + 3e-6)
-    const double tolerance = c.order <= 5 ? 1e-6 : 1e-4;
-    EXPECT_NEAR(sb / sa, 1.0, tolerance) << "order " << c.order;
+  // includes configurations where the transfer-function form fails
+  // (order 6, 0.5 Hz at 500 Hz: DC gain 0.985; order 8, 1 Hz: DC gain 2.2)
+  for (int order = 1; order <= wrench_filter::kMaxButterworthOrder; ++order) {
+    for (double cutoff_hz : {0.1, 0.5, 1.0, 2.5, 5.0, 20.0, 200.0}) {
+      for (const auto & s : butterworth_lowpass_sos(order, cutoff_hz, 500.0)) {
+        double sb = 0.0, sa = 0.0;
+        for (double v : s.b) {sb += v;}
+        for (double v : s.a) {sa += v;}
+        EXPECT_NEAR(sb / sa, 1.0, 1e-12) << "order " << order << ", " << cutoff_hz << " Hz";
+        EXPECT_TRUE(IirFilter::is_stable(s.a)) << "order " << order << ", " << cutoff_hz;
+      }
+    }
   }
+}
+
+TEST(Butterworth, CascadeSettlesToDcInput)
+{
+  // order 6, 0.5 Hz at 500 Hz is the configuration the transfer-function form got 1.5 % wrong
+  EXPECT_NEAR(cascade_step(butterworth_lowpass_sos(6, 0.5, 500.0), 20000), 1.0, 1e-9);
+  EXPECT_NEAR(cascade_step(butterworth_lowpass_sos(8, 0.1, 500.0), 100000), 1.0, 1e-9);
+  EXPECT_NEAR(cascade_step(butterworth_lowpass_sos(3, 20.0, 500.0), 2000), 1.0, 1e-12);
 }
 
 TEST(Butterworth, RejectsInvalidArguments)
 {
-  EXPECT_THROW(butterworth_lowpass(0, 2.5, 500.0), std::invalid_argument);
-  EXPECT_THROW(butterworth_lowpass(9, 2.5, 500.0), std::invalid_argument);
-  EXPECT_THROW(butterworth_lowpass(3, 0.0, 500.0), std::invalid_argument);
-  EXPECT_THROW(butterworth_lowpass(3, 250.0, 500.0), std::invalid_argument);  // at Nyquist
-  EXPECT_THROW(butterworth_lowpass(3, 2.5, 0.0), std::invalid_argument);
-  EXPECT_THROW(butterworth_lowpass(3, 2.5, NAN), std::invalid_argument);
-  EXPECT_THROW(butterworth_lowpass(3, NAN, 500.0), std::invalid_argument);
+  EXPECT_THROW(butterworth_lowpass_sos(0, 2.5, 500.0), std::invalid_argument);
+  EXPECT_THROW(butterworth_lowpass_sos(9, 2.5, 500.0), std::invalid_argument);
+  EXPECT_THROW(butterworth_lowpass_sos(3, 0.0, 500.0), std::invalid_argument);
+  EXPECT_THROW(butterworth_lowpass_sos(3, 250.0, 500.0), std::invalid_argument);  // Nyquist
+  EXPECT_THROW(butterworth_lowpass_sos(3, 2.5, 0.0), std::invalid_argument);
+  EXPECT_THROW(butterworth_lowpass_sos(3, 2.5, NAN), std::invalid_argument);
+  EXPECT_THROW(butterworth_lowpass_sos(3, NAN, 500.0), std::invalid_argument);
 }
